@@ -1,4 +1,4 @@
-name: Build MT7621 NETGEAR-BZV
+name: Build MT7621 NETGEAR-BZV (fightroad-KVR)
 
 on: 
   repository_dispatch:
@@ -34,10 +34,9 @@ jobs:
         sudo rm -rf /opt/rt-n56u
         ln -s /mnt/opt/rt-n56u /opt/rt-n56u
         
-        git clone --depth=1 --single-branch https://github.com/CopyPasteByteArtist/chongshengB-rt-n56u.git /opt/rt-n56u
+        git clone --depth=1 --single-branch https://github.com/fightroad/Padavan-KVR.git /opt/rt-n56u
         sed -i 's/192.168.2/192.168.6/g' /opt/rt-n56u/trunk/user/shared/defaults.h
         sed -i 's/ntp1.aliyun.com/time.pool.aliyun.com/g' /opt/rt-n56u/trunk/user/shared/defaults.h
-        sed -i 's/2001:470:0:50::2/time.asia.apple.com/g' /opt/rt-n56u/trunk/user/shared/defaults.h
         
         cd /opt/rt-n56u/toolchain-mipsel
         sh dl_toolchain.sh
@@ -48,7 +47,7 @@ jobs:
         echo "FILE_DATE=-$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
         ################################################################################################
-        # 加载配置文件
+        # 加载配置文件：优先工作区，回退到源码模板
         ################################################################################################
         CONFIG_SRC=""
         if [ -f "$GITHUB_WORKSPACE/$TNAME/$TNAME.config" ]; then
@@ -58,6 +57,8 @@ jobs:
         fi
         if [ -z "$CONFIG_SRC" ]; then
           echo "ERROR: No config found for $TNAME."
+          echo "Available templates:"
+          ls -1 /opt/rt-n56u/trunk/configs/templates/ 2>/dev/null || echo "(directory empty or not found)"
           exit 1
         fi
         echo "Using config: $CONFIG_SRC"
@@ -66,29 +67,23 @@ jobs:
         cd /opt/rt-n56u/trunk
 
         ################################################################################################
-        # 超频 1000MHz：诊断 + 替换
-        # 注意：grep 无匹配时返回 1，必须用 || echo 兜底，否则 set -e 会中断
+        # 超频 1000MHz：双重策略
+        # 1) 直接修改 init.c 的 PLL 字面值（最可靠）
+        # 2) 同时保留 .config 中的开关（作为辅助）
         ################################################################################################
         INIT_C="linux-3.4.x/arch/mips/rt2880/init.c"
         if [ -f "$INIT_C" ]; then
-          echo "=== Found: $INIT_C ==="
-          echo "=== Lines containing PLL/0x2B2/0x2b2/MEMCTRL ==="
-          grep -n "0x2B2\|0x2b2\|PLL\|pll\|MEMCTRL" "$INIT_C" || echo "(no PLL-related lines found)"
-
+          echo "=== PLL lines before replacement ==="
+          grep -n "0x2B2\|0x2b2\|PLL" "$INIT_C" || echo "(no PLL lines found in this file)"
+          
           sed -i 's/0x2B2/0x312/g' "$INIT_C"
           sed -i 's/0x2b2/0x312/g' "$INIT_C"
-
+          
           echo "=== Lines containing 0x312 after replacement ==="
-          grep -n "0x312" "$INIT_C" || echo "(WARNING: no 0x312 found, OC may not take effect)"
+          grep -n "0x312" "$INIT_C" || echo "(WARNING: 0x312 not found, OC may rely on .config only)"
         else
-          echo "WARNING: $INIT_C not found."
+          echo "WARNING: $INIT_C not found. Relying on .config OC option."
         fi
-
-        echo "=== Searching entire linux-3.4.x/arch/mips/ for 0x2B2 ==="
-        grep -rn "0x2B2\|0x2b2" linux-3.4.x/arch/mips/ 2>/dev/null | head -20 || echo "(no file contains 0x2B2 in linux-3.4.x/arch/mips/)"
-
-        echo "=== Searching for ralink_clk_init or CPU PLL logic ==="
-        grep -rn "ralink_clk_init\|CPU PLL\|cpu_fdiv" linux-3.4.x/arch/mips/ 2>/dev/null | head -20 || echo "(no clock init logic found)"
 
         ################################################################################################
         # 清理所有可选插件（"其它全部不要"）
@@ -115,21 +110,38 @@ jobs:
         ################################################################################################
         # 显式开启需要保留的功能
         ################################################################################################
+        # 超频辅助开关（与 init.c 修改配合）
         echo "CONFIG_FIRMWARE_CPU_900MHZ=y" >> .config
-        echo "CONFIG_FIRMWARE_INCLUDE_LANG_CN=y" >> .config
+        echo "CONFIG_FIRMWARE_MT7621_OC=\"0x312\"" >> .config
+
+        # KVR（注意 V 选项是 WNM，不是 RRM）
+        echo "CONFIG_RT_DOT11K_RRM=y" >> .config
+        echo "CONFIG_RT_DOT11R_FT=y" >> .config
+        echo "CONFIG_RT_DOT11V_WNM=y" >> .config
+
+        # SmartDNS
         echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y" >> .config
+
+        # 中文界面
+        echo "CONFIG_FIRMWARE_INCLUDE_LANG_CN=y" >> .config
+
+        # USB 基础与文件系统
         echo "CONFIG_FIRMWARE_ENABLE_USB=y" >> .config
         echo "CONFIG_FIRMWARE_ENABLE_UFSD=y" >> .config
         echo "CONFIG_FIRMWARE_ENABLE_FAT=y" >> .config
         echo "CONFIG_FIRMWARE_ENABLE_EXT4=y" >> .config
+
+        # USB 网卡 (USB-over-IP)
         echo "CONFIG_FIRMWARE_INCLUDE_USBIP=y" >> .config
+
+        # 基础访问功能
         echo "CONFIG_FIRMWARE_INCLUDE_HTTPS=y" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_OPENSSL_EC=y" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_OPENSSH=y" >> .config
 
-        echo "=== Final .config ==="
-        cat .config
+        echo "=== Final .config (relevant lines) ==="
+        grep -E "CPU_900|MT7621_OC|RT_DOT11|SMARTDNS|LANG_CN|USB|OPENSSH|HTTPS" .config || true
 
         ./clear_tree_simple
         fakeroot ./build_firmware_modify $TNAME 0
