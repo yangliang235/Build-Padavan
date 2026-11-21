@@ -65,26 +65,33 @@ jobs:
         cd /opt/rt-n56u/trunk
 
         ################################################################################################
-        # 超频 1000MHz：打印 545-565 行 + 替换所有可能的 PLL 值 (0x2B2/0x2C2 -> 0x312)
+        # 超频 1000MHz：把 init.c 中的 0xc2 精确替换为 0x312
+        # 说明：这个 fork 的 PLL 值写的是 0xc2（不是原版 0x2B2），
+        #       fbdiv = ((reg>>4)&0x7F)+1，0x312 对应 fbdiv=50 → 50*20=1000MHz
         ################################################################################################
         INIT_C="linux-3.4.x/arch/mips/rt2880/init.c"
         if [ -f "$INIT_C" ]; then
           echo "=== Lines 545-565 of $INIT_C (before) ==="
           sed -n '545,565p' "$INIT_C" || true
 
-          sed -i 's/0x2B2/0x312/g' "$INIT_C"
-          sed -i 's/0x2b2/0x312/g' "$INIT_C"
-          sed -i 's/0x2C2/0x312/g' "$INIT_C"
-          sed -i 's/0x2c2/0x312/g' "$INIT_C"
+          # 精确匹配带括号/比较符的 0xc2，避免误伤其他十六进制数
+          sed -i 's/!= 0xc2)/!= 0x312)/g' "$INIT_C"
+          sed -i 's/(0xc2);/(0x312);/g' "$INIT_C"
+          # 兜底：大小写变体与宽松写法
+          sed -i 's/0xC2/0x312/g' "$INIT_C"
 
           echo "=== Lines 545-565 of $INIT_C (after) ==="
           sed -n '545,565p' "$INIT_C" || true
+
+          echo "=== grep 0x312 in $INIT_C ==="
+          grep -n "0x312" "$INIT_C" || echo "(WARNING: 0x312 not found, check lines above manually)"
         else
-          echo "WARNING: $INIT_C not found."
+          echo "ERROR: $INIT_C not found."
+          exit 1
         fi
 
         ################################################################################################
-        # 修复 .config 中的超频开关：删除所有 CPU_900MHZ / MT7621_OC 行，再重新写入不带 # 的开关
+        # 修复 .config 中的超频开关（必须先删除被注释的行，再写入不带 # 的开关）
         ################################################################################################
         sed -i '/CONFIG_FIRMWARE_CPU_900MHZ/d' .config
         sed -i '/CONFIG_FIRMWARE_MT7621_OC/d' .config
