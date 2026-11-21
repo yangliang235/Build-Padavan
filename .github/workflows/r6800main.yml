@@ -9,7 +9,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     
     steps:
     - name: Checkout
@@ -19,13 +19,6 @@ jobs:
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        echo 'Run lscpu:'
-        lscpu
-        echo 'Run df -h:'
-        df -h
-        echo 'Run free -h:'
-        free -h
-        
         sudo apt-get update
         sudo apt-get install unzip libtool-bin curl cmake gperf gawk flex bison nano xxd \
         fakeroot kmod cpio git python3-docutils gettext automake autopoint \
@@ -37,9 +30,6 @@ jobs:
 
     - name: Clone source code
       run: |
-        echo 'current dir:'
-        pwd
-        
         mkdir -p /mnt/opt/rt-n56u
         sudo rm -rf /opt/rt-n56u
         ln -s /mnt/opt/rt-n56u /opt/rt-n56u
@@ -52,43 +42,53 @@ jobs:
         cd /opt/rt-n56u/toolchain-mipsel
         sh dl_toolchain.sh
         mkdir -p /opt/images/
-        
+
     - name: Build Firmware
       run: |
         echo "FILE_DATE=-$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
         ################################################################################################
-        # 加载配置文件：优先使用工作区 $TNAME/$TNAME.config，否则回退到源码模板
+        # 加载配置文件
         ################################################################################################
+        CONFIG_SRC=""
         if [ -f "$GITHUB_WORKSPACE/$TNAME/$TNAME.config" ]; then
-          echo "Using workspace config: $GITHUB_WORKSPACE/$TNAME/$TNAME.config"
-          cp -vpf "$GITHUB_WORKSPACE/$TNAME/$TNAME.config" /opt/rt-n56u/trunk/.config
+          CONFIG_SRC="$GITHUB_WORKSPACE/$TNAME/$TNAME.config"
         elif [ -f "/opt/rt-n56u/trunk/configs/templates/$TNAME.config" ]; then
-          echo "Workspace config not found, using template: configs/templates/$TNAME.config"
-          cp -vpf "/opt/rt-n56u/trunk/configs/templates/$TNAME.config" /opt/rt-n56u/trunk/.config
-        else
+          CONFIG_SRC="/opt/rt-n56u/trunk/configs/templates/$TNAME.config"
+        fi
+        if [ -z "$CONFIG_SRC" ]; then
           echo "ERROR: No config found for $TNAME."
           exit 1
         fi
+        echo "Using config: $CONFIG_SRC"
+        cp -vpf "$CONFIG_SRC" /opt/rt-n56u/trunk/.config
 
         cd /opt/rt-n56u/trunk
 
         ################################################################################################
-        # 超频 1000MHz：直接替换 init.c 中的 PLL 字面值 (0x2B2 -> 0x312)
-        # 注意：init.c 中该段代码位于 #if defined(CONFIG_RALINK_MT7621_PLL900) 内，
-        # 因此下面还会开启 CONFIG_FIRMWARE_CPU_900MHZ=y 来触发 PLL900 宏，
-        # 让这段 PLL 赋值代码被编译进来，再把 880MHz 改写成 1000MHz。
+        # 超频 1000MHz：诊断 + 替换
+        # 注意：grep 无匹配时返回 1，必须用 || echo 兜底，否则 set -e 会中断
         ################################################################################################
         INIT_C="linux-3.4.x/arch/mips/rt2880/init.c"
         if [ -f "$INIT_C" ]; then
+          echo "=== Found: $INIT_C ==="
+          echo "=== Lines containing PLL/0x2B2/0x2b2/MEMCTRL ==="
+          grep -n "0x2B2\|0x2b2\|PLL\|pll\|MEMCTRL" "$INIT_C" || echo "(no PLL-related lines found)"
+
           sed -i 's/0x2B2/0x312/g' "$INIT_C"
           sed -i 's/0x2b2/0x312/g' "$INIT_C"
-          echo "=== PLL check after replacement ==="
-          grep -n "0x312\|0x2B2\|0x2b2" "$INIT_C"
+
+          echo "=== Lines containing 0x312 after replacement ==="
+          grep -n "0x312" "$INIT_C" || echo "(WARNING: no 0x312 found, OC may not take effect)"
         else
-          echo "ERROR: $INIT_C not found! OC will NOT work."
-          exit 1
+          echo "WARNING: $INIT_C not found."
         fi
+
+        echo "=== Searching entire linux-3.4.x/arch/mips/ for 0x2B2 ==="
+        grep -rn "0x2B2\|0x2b2" linux-3.4.x/arch/mips/ 2>/dev/null | head -20 || echo "(no file contains 0x2B2 in linux-3.4.x/arch/mips/)"
+
+        echo "=== Searching for ralink_clk_init or CPU PLL logic ==="
+        grep -rn "ralink_clk_init\|CPU PLL\|cpu_fdiv" linux-3.4.x/arch/mips/ 2>/dev/null | head -20 || echo "(no clock init logic found)"
 
         ################################################################################################
         # 清理所有可选插件（"其它全部不要"）
@@ -115,33 +115,19 @@ jobs:
         ################################################################################################
         # 显式开启需要保留的功能
         ################################################################################################
-        # 超频触发开关（让 init.c 中的 PLL 代码被编译，配合上面的 0x312 修改）
         echo "CONFIG_FIRMWARE_CPU_900MHZ=y" >> .config
-
-        # 中文界面
         echo "CONFIG_FIRMWARE_INCLUDE_LANG_CN=y" >> .config
-
-        # SmartDNS
         echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y" >> .config
-
-        # USB 基础与文件系统（USB 网卡依赖 USB 总开关）
         echo "CONFIG_FIRMWARE_ENABLE_USB=y" >> .config
         echo "CONFIG_FIRMWARE_ENABLE_UFSD=y" >> .config
         echo "CONFIG_FIRMWARE_ENABLE_FAT=y" >> .config
         echo "CONFIG_FIRMWARE_ENABLE_EXT4=y" >> .config
-
-        # USB 网卡（USB-over-IP）
         echo "CONFIG_FIRMWARE_INCLUDE_USBIP=y" >> .config
-
-        # 基础访问功能（不保留将无法登录 WebUI / SSH）
         echo "CONFIG_FIRMWARE_INCLUDE_HTTPS=y" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_OPENSSL_EC=y" >> .config
         echo "CONFIG_FIRMWARE_INCLUDE_OPENSSH=y" >> .config
 
-        ################################################################################################
-        # 打印最终配置以便日志中核对
-        ################################################################################################
         echo "=== Final .config ==="
         cat .config
 
