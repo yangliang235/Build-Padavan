@@ -1,0 +1,157 @@
+name: Build MT7621 NETGEAR-BZV
+
+on: 
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  TNAME: "NETGEAR-BZV"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@main
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        echo 'Run lscpu:'
+        lscpu
+        echo 'Run df -h:'
+        df -h
+        echo 'Run free -h:'
+        free -h
+        
+        sudo apt-get update
+        sudo apt-get install unzip libtool-bin curl cmake gperf gawk flex bison nano xxd \
+        fakeroot kmod cpio git python3-docutils gettext automake autopoint \
+        texinfo build-essential help2man pkg-config zlib1g-dev libgmp3-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev wget libc-dev-bin
+        
+        sudo mkdir -p /mnt/opt
+        sudo chown $USER:$USER /mnt/opt
+
+    - name: Clone source code
+      run: |
+        echo 'current dir:'
+        pwd
+        
+        mkdir -p /mnt/opt/rt-n56u
+        sudo rm -rf /opt/rt-n56u
+        ln -s /mnt/opt/rt-n56u /opt/rt-n56u
+        
+        git clone --depth=1 --single-branch https://github.com/CopyPasteByteArtist/chongshengB-rt-n56u.git /opt/rt-n56u
+        sed -i 's/192.168.2/192.168.6/g' /opt/rt-n56u/trunk/user/shared/defaults.h
+        sed -i 's/ntp1.aliyun.com/time.pool.aliyun.com/g' /opt/rt-n56u/trunk/user/shared/defaults.h
+        sed -i 's/2001:470:0:50::2/time.asia.apple.com/g' /opt/rt-n56u/trunk/user/shared/defaults.h
+        
+        cd /opt/rt-n56u/toolchain-mipsel
+        sh dl_toolchain.sh
+        mkdir -p /opt/images/
+        
+    - name: Build Firmware
+      run: |
+        echo "FILE_DATE=-$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+        ################################################################################################
+        # 加载配置文件：优先使用工作区 $TNAME/$TNAME.config，否则回退到源码模板
+        ################################################################################################
+        if [ -f "$GITHUB_WORKSPACE/$TNAME/$TNAME.config" ]; then
+          echo "Using workspace config: $GITHUB_WORKSPACE/$TNAME/$TNAME.config"
+          cp -vpf "$GITHUB_WORKSPACE/$TNAME/$TNAME.config" /opt/rt-n56u/trunk/.config
+        elif [ -f "/opt/rt-n56u/trunk/configs/templates/$TNAME.config" ]; then
+          echo "Workspace config not found, using template: configs/templates/$TNAME.config"
+          cp -vpf "/opt/rt-n56u/trunk/configs/templates/$TNAME.config" /opt/rt-n56u/trunk/.config
+        else
+          echo "ERROR: No config found for $TNAME."
+          exit 1
+        fi
+
+        cd /opt/rt-n56u/trunk
+
+        ################################################################################################
+        # 超频 1000MHz：直接替换 init.c 中的 PLL 字面值 (0x2B2 -> 0x312)
+        # 注意：init.c 中该段代码位于 #if defined(CONFIG_RALINK_MT7621_PLL900) 内，
+        # 因此下面还会开启 CONFIG_FIRMWARE_CPU_900MHZ=y 来触发 PLL900 宏，
+        # 让这段 PLL 赋值代码被编译进来，再把 880MHz 改写成 1000MHz。
+        ################################################################################################
+        INIT_C="linux-3.4.x/arch/mips/rt2880/init.c"
+        if [ -f "$INIT_C" ]; then
+          sed -i 's/0x2B2/0x312/g' "$INIT_C"
+          sed -i 's/0x2b2/0x312/g' "$INIT_C"
+          echo "=== PLL check after replacement ==="
+          grep -n "0x312\|0x2B2\|0x2b2" "$INIT_C"
+        else
+          echo "ERROR: $INIT_C not found! OC will NOT work."
+          exit 1
+        fi
+
+        ################################################################################################
+        # 清理所有可选插件（"其它全部不要"）
+        ################################################################################################
+        for opt in SHADOWSOCKS V2RAY TROJAN SSOBFS XRAY SRELAY \
+                   ADBYBY KOOLPROXY ADGUARDHOME DNSFORWARDER \
+                   ZEROTIER ALIDDNS DDNSTO \
+                   MENTOHUST SCUTCLIENT GDUT_DRCOM DOGCOM MINIEAP NJIT_CLIENT \
+                   TRANSMISSION TRANSMISSION_WEB_CONTROL ARIA ARIA_WEB_CONTROL \
+                   MINIDLNA XUPNPD FIREFLY CADDY CADDYBIN WYY WYYBIN \
+                   OPENVPN SSWAN SOFTETHERVPN_SERVER SOFTETHERVPN_CLIENT SOFTETHERVPN_CMD \
+                   VLMCSD TTYD LRZSZ HTOP NANO IPERF3 MTR SOCAT \
+                   SMBD SMBD36 WINS SMBD_SYSLOG FTPD LPRD U2EC \
+                   EAP_PEAP SFTP TCPDUMP HDPARM PARTED CURL \
+                   XFRM QOS IMQ IFB IPSET SFE \
+                   NFSD NFSC CIFS NAPT66 \
+                   XFS FUSE SWAP HID AUDIO UVC SERIAL \
+                   DROPBEAR DROPBEAR_FAST_CODE RPL2TP DUMP1090 RTL_SDR \
+                   FRPC FRPS TUNSAFE; do
+          sed -i "/CONFIG_FIRMWARE_INCLUDE_${opt}=/d" .config
+          sed -i "/CONFIG_FIRMWARE_ENABLE_${opt}=/d" .config
+        done
+
+        ################################################################################################
+        # 显式开启需要保留的功能
+        ################################################################################################
+        # 超频触发开关（让 init.c 中的 PLL 代码被编译，配合上面的 0x312 修改）
+        echo "CONFIG_FIRMWARE_CPU_900MHZ=y" >> .config
+
+        # 中文界面
+        echo "CONFIG_FIRMWARE_INCLUDE_LANG_CN=y" >> .config
+
+        # SmartDNS
+        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNS=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_SMARTDNSBIN=y" >> .config
+
+        # USB 基础与文件系统（USB 网卡依赖 USB 总开关）
+        echo "CONFIG_FIRMWARE_ENABLE_USB=y" >> .config
+        echo "CONFIG_FIRMWARE_ENABLE_UFSD=y" >> .config
+        echo "CONFIG_FIRMWARE_ENABLE_FAT=y" >> .config
+        echo "CONFIG_FIRMWARE_ENABLE_EXT4=y" >> .config
+
+        # USB 网卡（USB-over-IP）
+        echo "CONFIG_FIRMWARE_INCLUDE_USBIP=y" >> .config
+
+        # 基础访问功能（不保留将无法登录 WebUI / SSH）
+        echo "CONFIG_FIRMWARE_INCLUDE_HTTPS=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_OPENSSL_EC=y" >> .config
+        echo "CONFIG_FIRMWARE_INCLUDE_OPENSSH=y" >> .config
+
+        ################################################################################################
+        # 打印最终配置以便日志中核对
+        ################################################################################################
+        echo "=== Final .config ==="
+        cat .config
+
+        ./clear_tree_simple
+        fakeroot ./build_firmware_modify $TNAME 0
+        mv -f images/*.trx /opt/images
+        cp -vpf .config /opt/images
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@main
+      with:
+        name: Padavan-MT7621-${{ env.TNAME }}-C${{ env.FILE_DATE }}
+        path: /opt/images
