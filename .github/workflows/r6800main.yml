@@ -47,7 +47,7 @@ jobs:
         echo "FILE_DATE=-$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
         ################################################################################################
-        # 加载配置文件：优先工作区，回退到源码模板
+        # 加载配置文件
         ################################################################################################
         CONFIG_SRC=""
         if [ -f "$GITHUB_WORKSPACE/$TNAME/$TNAME.config" ]; then
@@ -57,8 +57,6 @@ jobs:
         fi
         if [ -z "$CONFIG_SRC" ]; then
           echo "ERROR: No config found for $TNAME."
-          echo "Available templates:"
-          ls -1 /opt/rt-n56u/trunk/configs/templates/ 2>/dev/null || echo "(directory empty or not found)"
           exit 1
         fi
         echo "Using config: $CONFIG_SRC"
@@ -67,23 +65,31 @@ jobs:
         cd /opt/rt-n56u/trunk
 
         ################################################################################################
-        # 超频 1000MHz：双重策略
-        # 1) 直接修改 init.c 的 PLL 字面值（最可靠）
-        # 2) 同时保留 .config 中的开关（作为辅助）
+        # 超频 1000MHz：打印 545-565 行 + 替换所有可能的 PLL 值 (0x2B2/0x2C2 -> 0x312)
         ################################################################################################
         INIT_C="linux-3.4.x/arch/mips/rt2880/init.c"
         if [ -f "$INIT_C" ]; then
-          echo "=== PLL lines before replacement ==="
-          grep -n "0x2B2\|0x2b2\|PLL" "$INIT_C" || echo "(no PLL lines found in this file)"
-          
+          echo "=== Lines 545-565 of $INIT_C (before) ==="
+          sed -n '545,565p' "$INIT_C" || true
+
           sed -i 's/0x2B2/0x312/g' "$INIT_C"
           sed -i 's/0x2b2/0x312/g' "$INIT_C"
-          
-          echo "=== Lines containing 0x312 after replacement ==="
-          grep -n "0x312" "$INIT_C" || echo "(WARNING: 0x312 not found, OC may rely on .config only)"
+          sed -i 's/0x2C2/0x312/g' "$INIT_C"
+          sed -i 's/0x2c2/0x312/g' "$INIT_C"
+
+          echo "=== Lines 545-565 of $INIT_C (after) ==="
+          sed -n '545,565p' "$INIT_C" || true
         else
-          echo "WARNING: $INIT_C not found. Relying on .config OC option."
+          echo "WARNING: $INIT_C not found."
         fi
+
+        ################################################################################################
+        # 修复 .config 中的超频开关：删除所有 CPU_900MHZ / MT7621_OC 行，再重新写入不带 # 的开关
+        ################################################################################################
+        sed -i '/CONFIG_FIRMWARE_CPU_900MHZ/d' .config
+        sed -i '/CONFIG_FIRMWARE_MT7621_OC/d' .config
+        echo "CONFIG_FIRMWARE_CPU_900MHZ=y" >> .config
+        echo 'CONFIG_FIRMWARE_MT7621_OC="0x312"' >> .config
 
         ################################################################################################
         # 清理所有可选插件（"其它全部不要"）
@@ -110,11 +116,7 @@ jobs:
         ################################################################################################
         # 显式开启需要保留的功能
         ################################################################################################
-        # 超频辅助开关（与 init.c 修改配合）
-        echo "CONFIG_FIRMWARE_CPU_900MHZ=y" >> .config
-        echo "CONFIG_FIRMWARE_MT7621_OC=\"0x312\"" >> .config
-
-        # KVR（注意 V 选项是 WNM，不是 RRM）
+        # KVR（V 选项是 WNM）
         echo "CONFIG_RT_DOT11K_RRM=y" >> .config
         echo "CONFIG_RT_DOT11R_FT=y" >> .config
         echo "CONFIG_RT_DOT11V_WNM=y" >> .config
@@ -142,6 +144,12 @@ jobs:
 
         echo "=== Final .config (relevant lines) ==="
         grep -E "CPU_900|MT7621_OC|RT_DOT11|SMARTDNS|LANG_CN|USB|OPENSSH|HTTPS" .config || true
+
+        ################################################################################################
+        # 关键修复：设置 PTHREAD_CFLAGS，解决 e2fsprogs 编译错误
+        ################################################################################################
+        export PTHREAD_CFLAGS="-pthread"
+        echo "PTHREAD_CFLAGS is set to: $PTHREAD_CFLAGS"
 
         ./clear_tree_simple
         fakeroot ./build_firmware_modify $TNAME 0
